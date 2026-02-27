@@ -1,191 +1,197 @@
-Application Architecture — Agents, Groq LLM & API Layer
-Overview
-This is an agentic price comparison engine for Indian e-commerce. A user submits a product query (e.g. "Samsung Galaxy S24 256GB"), and the system scrapes multiple sites, normalizes the data, filters irrelevant results, ranks offers, and returns a structured comparison with an AI-generated recommendation.
+# AI-Powered E-Commerce Price Scraper Engine
 
-The backend is a 5-stage agent pipeline orchestrated by 
-main.py
-, where each agent transforms a shared 
-PipelineState
- object and passes it to the next.
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![Python](https://img.shields.io/badge/python-3.11+-blue.svg)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green.svg)
+![React](https://img.shields.io/badge/React-18.0+-blue.svg)
 
-The Pipeline — Stage by Stage
-POST /api/compare
-1. Planner
-2. Scraper
-3. Extractor
-4. Matcher
-5. Ranker
-LLM Explanation
-JSON Response
-Stage 1 — Planner (
-planner.py
-)
-Input	Output
-Raw query string (e.g. "samsung galaxy s24 256gb black")	
-NormalizedProduct
- + selected_marketplace_keys
-What it does:
+An intelligent, agentic price comparison engine tailored for Indian e-commerce platforms. 
 
-LLM Parse (via Groq) — sends the query to llama-3.3-70b-versatile with a system prompt asking it to extract {brand, model, storage, ram, color, category, optimized_search_query} as JSON
-Regex Fallback — if the LLM call fails (rate limit, key missing), falls back to regex parsing with hardcoded brand/storage/color patterns
-Marketplace Selection — picks which sites to scrape based on brand affinity (e.g. Samsung Shop only for Samsung queries)
-Groq LLM usage: Parses "iPhone 15 Pro 256GB Natural Titanium" → {brand: "Apple", model: "iPhone 15 Pro", storage: "256GB", color: "Natural Titanium", category: "smartphone", search_query: "Apple iPhone 15 Pro 256GB"}
+Users simply type a natural language query (e.g., *"Samsung Galaxy S24 256GB Black"*). Under the hood, the system coordinates an advanced pipeline of AI extraction agents and stealth web scrapers to gather real-time data from platforms like Amazon, Flipkart, Croma, Vijay Sales, JioMart, and Reliance Digital. The engine normalizes the data, filters out spurious accessories, ranks top offers based on multiple factors (price, delivery, trust), and returns a structured comparison along with a natural-language AI recommendation.
 
-Stage 2 — Scraper (
-scraper.py
- → 
-sgai_scraper.py
-)
-Input	Output
-search_query + marketplace_keys	List[RawListing] + List[SiteStatus]
-What it does:
+---
 
-The orchestrator in 
-sgai_scraper.py
- routes each site to its scraper:
+## 🏗️ System Architecture
 
-Amazon/Vijay Sales → dedicated Playwright+BS4 scrapers (CSS selectors, no LLM)
-All other sites (Flipkart, Croma, JioMart, etc.) → Playwright + Groq LLM extraction
-For Playwright+LLM sites, the flow is:
+The backend pipeline is orchestrated by a multi-agent system in `main.py`, where a shared `PipelineState` flows through 5 distinct functional stages.
 
-Launch stealth Chromium via Playwright → navigate to search URL → scroll the page
-Extract page text with _body_text() (strips scripts/styles, keeps [URL:...] markers)
-Truncate text via 
-_build_llm_input()
- (word budget + 8K char cap)
-Send to Groq (llama-3.1-8b-instant) with a prompt asking for JSON product listings
-Parse the LLM response into 
-RawListing
- objects
-For dedicated scrapers (Amazon, Vijay Sales):
+```mermaid
+graph TD
+    classDef agent fill:#f9f,stroke:#333,stroke-width:2px;
+    classDef data fill:#e1f5fe,stroke:#01579b,stroke-width:1px;
+    classDef ext fill:#fff3e0,stroke:#e65100,stroke-width:1px;
+    
+    User[User / Frontend] -->|POST /api/compare| API[FastAPI Orchestrator]
+    
+    subgraph "5-Stage Agent Pipeline"
+        P[1. Planner Agent]:::agent --> S[2. Scraper Agent]:::agent
+        S --> E[3. Extractor Agent]:::agent
+        E --> M[4. Matcher Agent]:::agent
+        M --> R[5. Ranker Agent]:::agent
+    end
+    
+    API --> P
+    R --> LLM[LLM Explanation]:::agent
+    LLM --> API
+    API -->|JSON CompareResponse| User
+    
+    %% Planner details
+    P -.->|Query parsing| Groq1[Groq: Llama 3.3 70B]:::ext
+    
+    %% Scraper details
+    S -.->|Dedicated Scraper| PW[Playwright + BS4]:::ext
+    S -.->|SGAI Fallback Scraper| Groq2[Groq: Llama 3.1 8B]:::ext
+    
+    %% Shared State
+    State[(Shared PipelineState)]:::data
+    P ==>|writes| State
+    S ==>|reads/writes| State
+    E ==>|reads/writes| State
+    M ==>|reads/writes| State
+    R ==>|reads/writes| State
+```
 
-Launch stealth Chromium → fetch HTML
-Parse product cards with BeautifulSoup CSS selectors (.a-price-whole, .product-card__inner, etc.)
-No LLM call needed — structured data extracted directly from DOM
-Groq LLM usage: For non-dedicated sites, the LLM reads raw page text and extracts product fields. The prompt asks for up to N products as a JSON array with title, price, rating, delivery, url. The fast model (llama-3.1-8b-instant) is used here for speed.
+---
 
-Stage 3 — Extractor (
-extractor.py
-)
-Input	Output
-List[RawListing] (text fields)	List[NormalizedOffer] (numeric fields)
-What it does:
+## 🔄 User Flow Diagram
 
-Converts text fields into numeric fields:
-price_text: "₹55,999" → discounted_price: 55999.0
-rating_text: "4.3 out of 5" → seller_rating: 4.3
-delivery_text: "Get it by Mon" → delivery_days_min: 1, delivery_days_max: 3
-Computes effective_price (the real cost after discounts)
-Deduplicates by URL or platform+title
-Does NOT use Groq — purely regex-based parsing
-Stage 4 — Matcher (
-matcher.py
-)
-Input	Output
-List[NormalizedOffer] + 
-NormalizedProduct
- (target)	List[NormalizedOffer] (filtered, scored)
-What it does: Scores each offer 0.0–1.0 based on how well it matches the target product:
+```mermaid
+sequenceDiagram
+    actor User
+    participant Frontend as React / Vite UI
+    participant API as FastAPI Backend
+    participant Pipeline as Agentic Pipeline
+    participant LLM as Groq LLM API
+    participant Stores as E-Commerce Sites
 
-Hard reject (score=0): wrong variant (S23 when searching S24), wrong category (case/cover), wrong storage (128GB vs 256GB), wrong model number
-Positive scoring: brand match (+0.25), model token overlap (+0.50), storage match (+0.25)
-Rejects accessories (cases, chargers, screen guards, etc.)
-Does NOT use Groq in the main path — purely token-based matching
-There's also an 
-llm_matcher.py
- available for semantic matching when regex confidence is uncertain (0.3–0.75 range), but it's not called in the current pipeline.
+    User->>Frontend: Enters Product Query
+    Frontend->>API: POST /api/compare {query}
+    API->>Pipeline: Initialize PipelineState
+    
+    Note over Pipeline: Stage 1: Planner
+    Pipeline->>LLM: Parse attributes (brand, model, storage)
+    LLM-->>Pipeline: Extracted attributes & categories
+    Pipeline->>Pipeline: Select relevant marketplaces
+    
+    Note over Pipeline: Stage 2: Scraper
+    par Concurrent Scraping
+        Pipeline->>Stores: Launch Stealth Playwright
+        Stores-->>Pipeline: Raw HTML / Text
+    end
+    Pipeline->>LLM: Fallback extract JSON from generic text
+    LLM-->>Pipeline: List of Raw Listings
+    
+    Note over Pipeline: Stage 3: Extractor
+    Pipeline->>Pipeline: Clean currency/strings to integers/floats
+    
+    Note over Pipeline: Stage 4: Matcher
+    Pipeline->>Pipeline: Score Listings (Reject accessories, wrong variants)
+    
+    Note over Pipeline: Stage 5: Ranker
+    Pipeline->>Pipeline: Rank based on price, delivery, and trust weights
+    
+    Note over Pipeline: Post-Process: Explanation
+    Pipeline->>LLM: "Explain why offer #1 is the best"
+    LLM-->>Pipeline: AI Justification summary
+    
+    Pipeline-->>API: CompareResponse
+    API-->>Frontend: JSON Dashboard Data
+    Frontend-->>User: Visual Price Comparison & AI Recommendation
+```
 
-Stage 5 — Ranker (
-ranker.py
-)
-Input	Output
-List[NormalizedOffer] (matched)	List[NormalizedOffer] (ranked, with badges)
-What it does:
+---
 
-Computes a 0–1 final score using weighted factors based on user preference mode:
-Mode	Price Weight	Delivery Weight	Trust Weight
-cheapest	0.80	0.10	0.10
-fastest	0.15	0.70	0.15
-reliable	0.20	0.20	0.60
-balanced	0.40	0.30	0.30
-Assigns badges: "Best Price", "Fastest Delivery", "Most Trusted", "Recommended"
-Sorts by final score → the #1 offer becomes the recommendation
-Does NOT use Groq — purely algorithmic
-Post-Pipeline: LLM Explanation (
-llm_ranker.py
-)
-After ranking, the pipeline optionally calls Groq to generate a 2-3 sentence natural language recommendation explaining why the top offer is the best choice. This is non-critical — if it fails, the pipeline still returns results without an explanation.
+## ⚙️ The Pipeline — End-to-End Workflow
 
-How Agents Interact — The PipelineState
-All agents communicate through a single shared object: 
-PipelineState
-.
+### Stage 1 — Planner (`planner.py`)
+- **Input:** Raw query string.
+- **Action:** Uses Groq (llama-3.3-70b-versatile) to extract structured fields `{brand, model, storage, ram, color, category, optimized_search_query}`.
+- **Resilience:** Regex fallback activated if the LLM rate limit triggers.
+- **Routing:** Dynamically selects marketplaces based on brand affinity (e.g., skips irrelevant sites).
 
-PipelineState
-writes
-writes
-reads
-reads
-writes
-writes
-reads
-writes
-reads
-reads
-writes
-reads
-writes
-request: CompareRequest
-normalized_product: NormalizedProduct
-selected_marketplace_keys: List[str]
-raw_listings: List[RawListing]
-site_statuses: List[SiteStatus]
-normalized_offers: List[NormalizedOffer]
-matched_offers: List[NormalizedOffer]
-final_offers: List[NormalizedOffer]
-Planner
-Scraper
-Extractor
-Matcher
-Ranker
-Pattern: Each agent reads from upstream fields and writes to its own downstream field. The state flows sequentially — Planner → Scraper → Extractor → Matcher → Ranker.
+### Stage 2 — Scraper (`scraper.py` → `sgai_scraper.py`)
+- **Input:** Search query & chosen marketplaces.
+- **Action:**
+  - *Dedicated Sites (Amazon, Vijay Sales):* Direct HTML extraction using Playwright + BeautifulSoup. High speed, reliable CSS parsing.
+  - *Generic Sites:* Launches Playwright stealth instances, extracts clean viewport body text, and pipes it to Groq (llama-3.1-8b-instant) for intelligent, generalized JSON extraction.
 
-Groq LLM Summary
-Component	Model Used	Purpose	Critical?
-Planner	llama-3.3-70b-versatile	Parse query → product attributes	No (regex fallback)
-Scraper (SGAI path)	llama-3.1-8b-instant	Extract products from raw page text	Yes (for non-dedicated sites)
-LLM Extractor	llama-3.1-8b-instant	Per-card extraction when CSS fails	Optional
-LLM Matcher	llama-3.3-70b-versatile	Semantic matching for uncertain cases	Optional (not called currently)
-LLM Explanation	llama-3.3-70b-versatile	Generate recommendation text	No (non-critical)
-All LLM calls go through 
-llm_client.py
- — a singleton 
-GroqLLMClient
- with a semaphore (max 3 concurrent) to respect Groq's free-tier rate limit (30 req/min).
+### Stage 3 — Extractor (`extractor.py`)
+- **Input:** Text-heavy `RawListing` objects.
+- **Action:** Highly aggressive Regex routines convert text strings into clean numeric structures (e.g., `"₹55,999"` → `55999.0`, `"Get it by Mon"` → `min/max delivery days`). Deals with deduplication.
 
-The API Layer
-The backend is a FastAPI application serving a React frontend.
+### Stage 4 — Matcher (`matcher.py`)
+- **Input:** Clean numerics + Intent Target.
+- **Action:** Scoring engine checks variant mismatches (S23 vs S24), invalidates accessories (charging blocks, covers), and computes a confidence score `[0.0 - 1.0]`. Low scores are pruned.
 
-Endpoint	Method	Purpose
-/	GET	App info and version
-/health	GET	LLM status, Groq key presence, marketplace count
-/api/marketplaces	GET	List all configured marketplaces with metadata
-/api/health/scrapers	GET	Per-site readiness status
-/api/compare	POST	Main endpoint — runs the full 5-stage pipeline
-/api/debug/compare	POST	Same pipeline but returns all intermediate data
-/api/compare Flow
-Frontend → POST /api/compare { query: "Samsung Galaxy S24" }
-         → _run_pipeline(request)
-           → Planner → Scraper → Extractor → Matcher → Ranker → LLM Explanation
-         → CompareResponse {
-             final_offers: [...ranked offers...],
-             recommendation: top offer,
-             explanation: "Samsung Galaxy S24 on Amazon at ₹55,999 is...",
-             site_statuses: [{amazon: ok}, {flipkart: ok}, ...],
-             errors: []
-           }
-The frontend (React via Vite) calls this endpoint, shows a loading state while the pipeline runs (~15-30s), then renders the comparison table with badges, prices, and the AI recommendation.
+### Stage 5 — Ranker (`ranker.py`)
+- **Input:** Verified matched offers.
+- **Action:** Adjusts rankings based on the user's focus (cheapest vs. fastest vs. most reliable). Injects aesthetic UI badges ("Best Price", "Most Trusted"). The `#1` ranked offer triggers the LLM explanation generator.
 
+---
 
-Comment
-Ctrl+Alt+M
+## 🚀 Tech Stack
+
+- **Frontend:** React.js, Vite, TailwindCSS (Responsive, Glassmorphic UI)
+- **Backend Core:** Python 3.11+, FastAPI (Async Orchestration)
+- **Scraping Engine:** Playwright (Stealth Plugins), BeautifulSoup4
+- **AI/LLM Layer:** Groq APIs, featuring Llama 3 70B (Deep extraction) and Llama 3 8B (Fast parsing).
+- **Concurrency:** `asyncio`, Semaphore-based LLM rate limiting.
+
+---
+
+## 💻 Installation & Setup
+
+### 1. Pre-requisites
+- Python 3.11+
+- Node.js v18+
+- Go to [Groq Console](https://console.groq.com/keys) to generate your API key.
+
+### 2. Backend Setup
+```bash
+# Clone the repository
+git clone https://github.com/SiddharajShirke/Ai-Powered-e-commerce-scraper-.git
+cd Ai-Powered-e-commerce-scraper-
+
+# Create virtual environment
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+
+# Install requirements
+pip install -r requirements.txt
+
+# Install stealth browsers
+playwright install
+playwright install-deps
+
+# Set up environment variables
+cp .env.example .env
+nano .env  # Add your GROQ_API_KEY
+```
+
+### 3. Frontend Setup
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+### 4. Running the Complete System
+Start the FastAPI server:
+```bash
+# In the root project directory (ensure venv is active)
+uvicorn app.main:app --reload --port 8000
+```
+Open `http://localhost:5173` in your browser.
+
+---
+
+## 📡 Essential API Routes
+
+- **`GET /`**: Server Heartbeat.
+- **`GET /health`**: LLM connectivity status & system readiness.
+- **`GET /api/marketplaces`**: Available vendor scraping modules.
+- **`POST /api/compare`**: The main orchestration endpoint. Triggers the 5-stage pipeline and returns the full `CompareResponse`. 
+- **`POST /api/debug/compare`**: Similar to above but dumps the `PipelineState` step by step for telemetry.
+
+---
+*Built to bring total transparency and speed to consumer price discovery.*
