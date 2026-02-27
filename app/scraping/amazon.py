@@ -309,6 +309,13 @@ class AmazonScraper:
         # Shipping
         shipping_text = _extract_shipping(card, price_text)
 
+        # Product image thumbnail
+        img_el = _sel(card, "img.s-image", "img[data-image-latency='s-product-image']",
+                       ".s-image-square-aspect img", "img[src*='images-amazon']")
+        image_url = None
+        if img_el:
+            image_url = img_el.get("src") or img_el.get("data-src") or None
+
         return RawListing(
             platform_key="amazon",
             listing_url=listing_url,
@@ -320,6 +327,7 @@ class AmazonScraper:
             delivery_text=delivery_text,
             shipping_text=shipping_text,
             seller_text="Amazon.in",
+            image_url=image_url,
         )
 
 
