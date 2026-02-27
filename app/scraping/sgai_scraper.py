@@ -473,7 +473,7 @@ async def _fetch_html_playwright(
         async with async_playwright() as p:
             # Launch with anti-detection args
             browser = await p.chromium.launch(
-                headless=settings.playwright_headless,
+                headless=True,  # Always headless — backend-only, never opens a window
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     "--disable-features=IsolateOrigins,site-per-process",

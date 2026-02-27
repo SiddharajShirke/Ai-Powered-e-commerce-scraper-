@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     llm_max_concurrent: int  = 3
 
     # ── Browser ───────────────────────────────────────────────────────────────
-    playwright_headless: bool = False
+    playwright_headless: bool = True
 
     # ── Marketplaces ─────────────────────────────────────────────────────────
     marketplaces_dir: str = "app/marketplaces/configs"
