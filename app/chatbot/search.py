@@ -58,6 +58,26 @@ async def fetch_shopping_results(message: str, intent: str) -> List[ShoppingResu
 
         products: List[ShoppingResult] = []
         for item in shopping_results[:10]:
+            # SerpAPI returns product_link for merchant URLs, link is usually null
+            product_url = (
+                item.get("product_link")
+                or item.get("link")
+                or item.get("serpapi_product_api")
+                or None
+            )
+
+            # SerpAPI sometimes puts delivery info in 'extensions' list
+            delivery = item.get("delivery")
+            if not delivery:
+                exts = item.get("extensions", [])
+                for ext in (exts if isinstance(exts, list) else []):
+                    if isinstance(ext, str) and any(
+                        kw in ext.lower()
+                        for kw in ("deliver", "ship", "free", "dispatch", "arrival")
+                    ):
+                        delivery = ext
+                        break
+
             products.append(
                 ShoppingResult(
                     title=item.get("title", ""),
@@ -65,9 +85,9 @@ async def fetch_shopping_results(message: str, intent: str) -> List[ShoppingResu
                     rating=item.get("rating", None),
                     reviews=item.get("reviews", None),
                     source=item.get("source", None),
-                    delivery=item.get("delivery", None),
+                    delivery=delivery,
                     thumbnail=item.get("thumbnail", None),
-                    link=item.get("link", None),
+                    link=product_url,
                 )
             )
 

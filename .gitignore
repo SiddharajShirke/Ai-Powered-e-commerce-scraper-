@@ -45,6 +45,19 @@ app/scraping/debug/
 playwright-report/
 test-results/
 
+# ── Dev / Analysis Scripts & Output ───────────────────────────
+analyze.py
+analyze_stealth.py
+check_results.py
+diagnose.py
+show_full.py
+show_result.py
+show_sites.py
+show_stats.py
+analysis.txt
+diagnose_output.txt
+results_analysis.txt
+
 # ── Logs ──────────────────────────────────────────────────────
 *.log
 logs/
