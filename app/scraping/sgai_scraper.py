@@ -202,8 +202,8 @@ def _build_llm_input(page_text: str, word_budget: int) -> str:
     """Clean and truncate page text for LLM. Keeps [URL:...] markers."""
     text = page_text
 
-    # Strip image markers (saves tokens)
-    text = re.sub(r'\[IMG:[^\]]{0,500}\]', '', text)
+    # Shorten image markers to save tokens (keep first 200 chars of URL)
+    text = re.sub(r'\[IMG:([^\]]{0,500})\]', lambda m: f'[IMG:{m.group(1)[:200]}]', text)
 
     # Shorten long URL markers but KEEP enough for valid product URLs
     def _shorten_url_marker(m: re.Match) -> str:
@@ -245,7 +245,7 @@ def _build_llm_input(page_text: str, word_budget: int) -> str:
     text = ' '.join(words[:word_budget])
 
     # Character-level cap — Groq has request size limits (~6K tokens ≈ ~24K chars)
-    _MAX_CHARS = 8000
+    _MAX_CHARS = 10000
     if len(text) > _MAX_CHARS:
         text = text[:_MAX_CHARS]
 
@@ -279,7 +279,7 @@ def _build_prompt(search_query: str, max_results: int) -> str:
         f"- rating_text: Star rating (e.g. '4.3'). null if not shown.\n"
         f"- review_count_text: Number of ratings/reviews. null if not shown.\n"
         f"- delivery_text: Delivery estimate if shown. null if not visible.\n"
-        f"- image_url: null (not needed).\n"
+        f"- image_url: Extract from [IMG:https://...] markers near each product. Use the image closest to the product title. null if not shown.\n"
         f"- seller_text: Seller name if shown. null if not shown.\n"
         f"- return_policy_text: null.\n\n"
         f"═══ ABSOLUTE PROHIBITIONS ═══\n"
@@ -413,6 +413,23 @@ _EXTRACT_TEXT_JS = """
             } catch(e) {}
         });
 
+        // Inject IMG markers for product thumbnail images
+        document.querySelectorAll('img[src]').forEach(img => {
+            try {
+                const src = img.getAttribute('src') || img.getAttribute('data-src') || '';
+                if (src && src.startsWith('http') && src.length > 10 && src.length < 500 &&
+                    !src.includes('icon') && !src.includes('logo') && !src.includes('sprite') &&
+                    !src.includes('pixel') && !src.includes('1x1') && !src.includes('blank')) {
+                    const w = img.naturalWidth || img.width || 0;
+                    const h = img.naturalHeight || img.height || 0;
+                    if (w === 0 || w >= 40) {
+                        const marker = document.createTextNode(' [IMG:' + src + '] ');
+                        if (img.parentNode) img.parentNode.insertBefore(marker, img.nextSibling);
+                    }
+                }
+            } catch(e) {}
+        });
+
         return document.body ? document.body.innerText : '';
     } catch(e) {
         return document.body ? document.body.innerText : '';
@@ -440,6 +457,18 @@ _EXTRACT_PRODUCTS_JS = """
                         !href.startsWith('javascript:') &&
                         (href.startsWith('/') || href.startsWith('http'))) {
                         a.appendChild(document.createTextNode(' [URL:' + href + '] '));
+                    }
+                } catch(e) {}
+            });
+
+            // Inject IMG markers for product thumbnails
+            c.querySelectorAll('img[src], img[data-src]').forEach(img => {
+                try {
+                    const src = img.getAttribute('src') || img.getAttribute('data-src') || '';
+                    if (src && src.startsWith('http') && src.length > 10 && src.length < 500 &&
+                        !src.includes('icon') && !src.includes('logo') && !src.includes('sprite')) {
+                        const marker = document.createTextNode(' [IMG:' + src + '] ');
+                        if (img.parentNode) img.parentNode.insertBefore(marker, img.nextSibling);
                     }
                 } catch(e) {}
             });
@@ -677,6 +706,21 @@ def _get_field(item, key: str) -> Optional[str]:
     return None if s.lower() in _NULL_VALS else s
 
 
+def _clean_image_url(raw: Optional[str]) -> Optional[str]:
+    """Strip [IMG:...] wrapper and validate the URL."""
+    if not raw:
+        return None
+    raw = raw.strip()
+    if raw.startswith("[IMG:"):
+        raw = raw[5:].rstrip("]").strip()
+    if not raw.startswith("http"):
+        return None
+    # Reject tiny pixel / tracking images
+    if any(x in raw.lower() for x in ("1x1", "pixel", "spacer", "blank", "transparent")):
+        return None
+    return raw
+
+
 # ── Result parser ────────────────────────────────────────────────────────────
 
 def _parse_result(result: dict, config: MarketplaceConfig) -> List[RawListing]:
@@ -715,7 +759,7 @@ def _parse_result(result: dict, config: MarketplaceConfig) -> List[RawListing]:
             shipping_text=None,
             seller_text=_get_field(item, "seller_text"),
             return_policy_text=_get_field(item, "return_policy_text"),
-            image_url=_get_field(item, "image_url"),
+            image_url=_clean_image_url(_get_field(item, "image_url")),
         ))
 
     return listings

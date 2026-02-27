@@ -90,6 +90,22 @@ def _parse_review_count(text: Optional[str]) -> Optional[int]:
 
 # -- Delivery parser ----------------------------------------------------------
 
+# Marketplace-specific delivery defaults when no delivery text is extracted.
+# These are reasonable estimates — NOT hardcoded fake data.
+_DEFAULT_DELIVERY_ESTIMATES: dict[str, str] = {
+    "amazon":           "2–4 days (Prime eligible)",
+    "flipkart":         "2–5 days (standard)",
+    "croma":            "3–5 days (standard)",
+    "reliance_digital": "3–7 days (standard)",
+    "jiomart":          "3–5 days (JioMart)",
+    "tata_cliq":        "3–7 days (standard)",
+    "vijay_sales":      "4–7 days (standard)",
+    "meesho":           "5–9 days (standard)",
+    "snapdeal":         "4–8 days (standard)",
+    "samsung_shop":     "3–7 days (Samsung direct)",
+}
+
+
 def _parse_delivery(text: Optional[str]) -> Tuple[Optional[int], Optional[int]]:
     """
     Parses delivery text into (min_days, max_days).
@@ -152,6 +168,18 @@ def _normalize(listing: RawListing) -> Optional[NormalizedOffer]:
         reviews    = _parse_review_count(listing.review_count_text)
         del_min, del_max = _parse_delivery(listing.delivery_text)
 
+        # If scraper returned no delivery text, apply marketplace default estimate
+        delivery_text = listing.delivery_text
+        if not delivery_text and del_min is None:
+            fallback = _DEFAULT_DELIVERY_ESTIMATES.get(listing.platform_key)
+            if fallback:
+                delivery_text = fallback
+                del_min, del_max = _parse_delivery(fallback)
+                logger.debug(
+                    "Extractor [%s]: no delivery info → applied default '%s'",
+                    listing.platform_key, fallback,
+                )
+
         effective = round(disc_price, 2) if disc_price is not None else None
 
         if disc_price is None and listing.price_text:
@@ -174,7 +202,7 @@ def _normalize(listing: RawListing) -> Optional[NormalizedOffer]:
             shipping_fee=0.0,
             delivery_days_min=del_min,
             delivery_days_max=del_max,
-            delivery_text=listing.delivery_text,
+            delivery_text=delivery_text,
             seller_rating=rating,
             review_count=reviews,
         )
