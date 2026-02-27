@@ -104,6 +104,17 @@ def _build_counts(state: PipelineState) -> dict:
 async def _run_pipeline(request: CompareRequest) -> PipelineState:
     state = _make_state(request)
 
+    # ── Pre-flight: Groq key required ────────────────────────────────────
+    if not (settings.groq_api_key or "").strip():
+        state.add_error(
+            "GROQ_API_KEY is not set in .env — the scraper cannot extract "
+            "product data without a Groq LLM key. Get a free key at "
+            "https://console.groq.com and add it to your .env file, then "
+            "restart the server."
+        )
+        logger.error("Pipeline aborted: GROQ_API_KEY is empty")
+        return state
+
     state = await run_planner(state)
     if not state.normalized_product:
         state.add_error("Planner: could not parse query into product attributes")
