@@ -1,255 +1,197 @@
-Here is the complete detailed summary of everything built, solved, and pending in this session.
+# AI-Powered E-Commerce Price Scraper Engine
 
-***
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![Python](https://img.shields.io/badge/python-3.11+-blue.svg)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green.svg)
+![React](https://img.shields.io/badge/React-18.0+-blue.svg)
 
-# Agentic Price Browser — Complete Project Summary
+An intelligent, agentic price comparison engine tailored for Indian e-commerce platforms. 
 
-## What We Built
+Users simply type a natural language query (e.g., *"Samsung Galaxy S24 256GB Black"*). Under the hood, the system coordinates an advanced pipeline of AI extraction agents and stealth web scrapers to gather real-time data from platforms like Amazon, Flipkart, Croma, Vijay Sales, JioMart, and Reliance Digital. The engine normalizes the data, filters out spurious accessories, ranks top offers based on multiple factors (price, delivery, trust), and returns a structured comparison along with a natural-language AI recommendation.
 
-A **local, free, AI-powered multi-agent price comparison system** for Indian e-commerce. It accepts a product query, scrapes 10+ marketplaces in parallel using real browser automation, normalizes and matches listings using LLM intelligence, ranks them by user preference, and returns structured JSON with an AI-generated recommendation.
+---
 
-***
+## 🏗️ System Architecture
 
-## Tech Stack
+The backend pipeline is orchestrated by a multi-agent system in `main.py`, where a shared `PipelineState` flows through 5 distinct functional stages.
 
-| Layer | Technology | Purpose |
-|---|---|---|
-| **Backend API** | FastAPI + Uvicorn | Async REST API server |
-| **Browser Automation** | Playwright (Chromium) | Real browser scraping |
-| **Stealth** | `playwright-stealth` + custom JS | Bypass bot detection  [scrapeless](https://www.scrapeless.com/en/blog/avoid-bot-detection-with-playwright-stealth) |
-| **LLM** | Groq API (`llama-3.3-70b-versatile` + `llama-3.1-8b-instant`) | Query parsing, selector discovery, matching, explanation |
-| **Config** | YAML per marketplace | Dynamic site registry |
-| **Validation** | Pydantic v2 | Request/response schemas |
-| **Dev Reload** | `watchfiles.run_process` | Hot reload on Windows |
-| **Frontend** | React + Vite + Tailwind CSS | Search UI |
-| **Language** | Python 3.11 | Core runtime |
-
-***
-
-## Full System Architecture
-
-```
-USER REQUEST (query / product URL)
-         │
-         ▼
-┌─────────────────────────────────────────────────────┐
-│                  FastAPI Server                      │
-│          POST /api/compare                          │
-│          POST /api/debug/compare                    │
-│          GET  /api/health/scrapers                  │
-└─────────────────────────┬───────────────────────────┘
-                          │
-                          ▼
-┌─────────────────────────────────────────────────────┐
-│              5-Stage Agent Pipeline                  │
-│                                                     │
-│  Stage 1: PLANNER                                   │
-│  ┌──────────────────────────────────────────────┐   │
-│  │ LLM (llama-3.3-70b) parses query →           │   │
-│  │ brand / model / storage / color / category   │   │
-│  │ Falls back to regex if LLM fails             │   │
-│  │ Selects marketplaces (brand affinity filter) │   │
-│  └──────────────────────────────────────────────┘   │
-│                          │                          │
-│  Stage 2: SCRAPER        ▼                          │
-│  ┌──────────────────────────────────────────────┐   │
-│  │ asyncio.gather → all 10 sites in parallel    │   │
-│  │ Per site: Playwright opens real browser      │   │
-│  │ Stealth JS + per-domain context isolation    │   │
-│  │ Bot challenge → reset context → retry once   │   │
-│  │ Selector: YAML → universal → LLM discovery  │   │
-│  │ Saves debug HTML for every failure           │   │
-│  └──────────────────────────────────────────────┘   │
-│                          │                          │
-│  Stage 3: EXTRACTOR      ▼                          │
-│  ┌──────────────────────────────────────────────┐   │
-│  │ Parse price/rating/delivery from raw text    │   │
-│  │ LLM enriches cards missing price field       │   │
-│  │ Compute effective_price = disc - coupon      │   │
-│  └──────────────────────────────────────────────┘   │
-│                          │                          │
-│  Stage 4: MATCHER        ▼                          │
-│  ┌──────────────────────────────────────────────┐   │
-│  │ Regex brand/model/storage/color scoring      │   │
-│  │ LLM called for uncertain scores (0.3–0.75)   │   │
-│  │ Hard reject: model number mismatch           │   │
-│  │ Accessory keyword filter                     │   │
-│  │ Deduplication by (platform, price)           │   │
-│  └──────────────────────────────────────────────┘   │
-│                          │                          │
-│  Stage 5: RANKER         ▼                          │
-│  ┌──────────────────────────────────────────────┐   │
-│  │ Score breakdown: price / delivery / trust    │   │
-│  │ 4 modes: cheapest/fastest/reliable/balanced  │   │
-│  │ Badge assignment: Top Pick / Lowest / Fastest│   │
-│  │ LLM generates explanation + tradeoffs        │   │
-│  └──────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────┘
-                          │
-                          ▼
-        Structured JSON response with offers,
-        site_statuses, explanation, score_breakdown
+```mermaid
+graph TD
+    classDef agent fill:#f9f,stroke:#333,stroke-width:2px;
+    classDef data fill:#e1f5fe,stroke:#01579b,stroke-width:1px;
+    classDef ext fill:#fff3e0,stroke:#e65100,stroke-width:1px;
+    
+    User[User / Frontend] -->|POST /api/compare| API[FastAPI Orchestrator]
+    
+    subgraph "5-Stage Agent Pipeline"
+        P[1. Planner Agent]:::agent --> S[2. Scraper Agent]:::agent
+        S --> E[3. Extractor Agent]:::agent
+        E --> M[4. Matcher Agent]:::agent
+        M --> R[5. Ranker Agent]:::agent
+    end
+    
+    API --> P
+    R --> LLM[LLM Explanation]:::agent
+    LLM --> API
+    API -->|JSON CompareResponse| User
+    
+    %% Planner details
+    P -.->|Query parsing| Groq1[Groq: Llama 3.3 70B]:::ext
+    
+    %% Scraper details
+    S -.->|Dedicated Scraper| PW[Playwright + BS4]:::ext
+    S -.->|SGAI Fallback Scraper| Groq2[Groq: Llama 3.1 8B]:::ext
+    
+    %% Shared State
+    State[(Shared PipelineState)]:::data
+    P ==>|writes| State
+    S ==>|reads/writes| State
+    E ==>|reads/writes| State
+    M ==>|reads/writes| State
+    R ==>|reads/writes| State
 ```
 
-***
+---
 
-## File Structure Built
+## 🔄 User Flow Diagram
 
-```
-app/
-├── main.py                        ← FastAPI app, lifespan, all routes
-├── config.py                      ← Settings from .env
-├── schemas.py                     ← All Pydantic models
-├── __init__.py                    ← Empty (critical)
-│
-├── agents/
-│   ├── __init__.py                ← PipelineState dataclass
-│   ├── planner.py                 ← Stage 1: LLM + regex query parsing
-│   ├── scraper.py                 ← Stage 2: orchestrator wrapper
-│   ├── extractor.py               ← Stage 3: price/field normalization
-│   ├── matcher.py                 ← Stage 4: product match scoring
-│   ├── ranker.py                  ← Stage 5: ranking + badges + explanation
-│   ├── llm_extractor.py           ← LLM: enrich missing fields + discover selectors
-│   ├── llm_matcher.py             ← LLM: semantic match scoring
-│   └── llm_ranker.py              ← LLM: explanation generation
-│
-├── scraping/
-│   ├── __init__.py                ← Empty (critical)
-│   ├── base.py                    ← BaseScraper: full Playwright lifecycle
-│   ├── orchestrator.py            ← asyncio.gather across all sites
-│   ├── playwright_manager.py      ← Singleton browser, stealth, per-domain contexts
-│   ├── selector_engine.py         ← Multi-strategy selector resolution + caching
-│   ├── amazon.py / flipkart.py    ← Per-site scraper subclasses
-│   ├── croma.py / jiomart.py      ← (all extend BaseScraper)
-│   └── debug/                     ← Auto-saved HTML snapshots on failures
-│
-├── marketplaces/
-│   ├── registry.py                ← YAML loader, MarketplaceConfig dataclass
-│   └── configs/
-│       ├── amazon.yaml            ← 10 marketplace configs
-│       ├── flipkart.yaml
-│       └── ... (croma, jiomart, meesho, reliance_digital,
-│               snapdeal, tata_cliq, vijay_sales, samsung_shop)
-│
-└── utils/
-    ├── llm_client.py              ← Groq client, JSON completion, fast model toggle
-    └── logger.py                  ← Structured logging
+```mermaid
+sequenceDiagram
+    actor User
+    participant Frontend as React / Vite UI
+    participant API as FastAPI Backend
+    participant Pipeline as Agentic Pipeline
+    participant LLM as Groq LLM API
+    participant Stores as E-Commerce Sites
 
-run.py                             ← Entry point with watchfiles hot-reload
-frontend/                          ← React + Vite + Tailwind SPA
-```
-
-***
-
-## Issues Solved (Chronological)
-
-### 1. `NotImplementedError` — Playwright on Windows
-- **Cause:** Windows `WindowsSelectorEventLoopPolicy` blocks `subprocess_exec`. Uvicorn with `reload=True` forces SelectorLoop internally. [github](https://github.com/zauberzeug/nicegui/issues/3874)
-- **Fix:** `run.py` uses `watchfiles.run_process(_server)` where `_server()` sets `WindowsProactorEventLoopPolicy` **before** calling `uvicorn.run(..., loop="none")`.
-
-### 2. `0 raw_listings`, `site_statuses: []`, `0.2s response`
-- **Cause:** `app/scraping/__init__.py` and `app/__init__.py` had old-codebase imports causing `ImportError` on every `importlib.import_module("app.scraping.X")`. The `_scrape_one()` exception handler was returning `([], None, key, "")` — `None` status was silently dropped by the `if status:` guard.
-- **Fix:** Wiped both `__init__.py` files to empty. Rewrote `_scrape_one()` to **always** return a proper `SiteStatus` — never `None`.
-
-### 3. `ImportError: cannot import name 'run_planner'`
-- **Cause:** All 5 agent files (`planner.py`, `scraper.py`, `extractor.py`, `matcher.py`, `ranker.py`) were old versions from a previous codebase phase with wrong function names and signatures.
-- **Fix:** Complete rewrite of all 5 agent files with correct async function signatures matching `app/main.py` imports.
-
-### 4. `invalid syntax (base.py, line 224)` → `0/9 importable`
-- **Cause:** Unicode characters (`→`, `──`, `—`) in f-strings and comments got corrupted during copy-paste from chat to Windows editor.
-- **Fix:** Rewrote `base.py` using 100% ASCII-safe string concatenation instead of f-strings with special characters.
-
-### 5. `expected 'except' or 'finally' block (base.py, line 97)` → `0/9 importable`
-- **Cause:** The bot-challenge retry snippet from Fix 2 was pasted as a **partial snippet** inside the existing `try` block, creating an orphaned nested `try` without a matching `except`.
-- **Fix:** Provided the complete `base.py` as a single coherent file — the bot retry block is a proper `if` branch inside the main `try`, not a new `try`.
-
-### 6. `HARD_REJECT(model_mismatch)` — iPhone Air scraped instead of iPhone 15
-- **Cause:** Amazon search URL without sort parameter returned newest/featured items first (iPhone Air was new at time of test).
-- **Fix:** Changed Amazon `search_url_pattern` to `&s=review-rank` to sort by reviews, pushing established products to top.
-
-### 7. `Reliance Digital timeout (25s)`
-- **Cause:** `wait_strategy: "networkidle"` in YAML — Reliance Digital JS never fully settles so networkidle never fires.
-- **Fix:** Changed to `wait_strategy: "domcontentloaded"` in YAML.
-
-### 8. `asyncio.Semaphore` module-level creation risk
-- **Cause:** `_SEMAPHORE = asyncio.Semaphore(4)` at module import time can bind to wrong event loop.
-- **Fix:** Changed to lazy initialization via `_get_semaphore()` function, called only inside async context.
-
-***
-
-## Issues Still Present / Not Fully Resolved
-
-### ⚠️ 1. Bot Challenge on 5 Sites (Major)
-Flipkart, Croma, JioMart, Meesho, Tata CLiQ are returning `bot_challenge` even with stealth JS. [scrapeless](https://www.scrapeless.com/en/blog/avoid-bot-detection-with-playwright-stealth)
-
-```
-Root cause: Cloudflare / custom bot detection fingerprints headless Chromium
-Status:     Retry-with-reset-context implemented but may still fail
-Remaining:  Sites using Cloudflare Turnstile or advanced TLS fingerprinting
-            require proxy rotation or residential IPs to fully bypass
-Next fix:   Set PLAYWRIGHT_HEADLESS=False in .env (headed mode bypasses most)
-            OR integrate free proxy list rotation in playwright_manager.py
+    User->>Frontend: Enters Product Query
+    Frontend->>API: POST /api/compare {query}
+    API->>Pipeline: Initialize PipelineState
+    
+    Note over Pipeline: Stage 1: Planner
+    Pipeline->>LLM: Parse attributes (brand, model, storage)
+    LLM-->>Pipeline: Extracted attributes & categories
+    Pipeline->>Pipeline: Select relevant marketplaces
+    
+    Note over Pipeline: Stage 2: Scraper
+    par Concurrent Scraping
+        Pipeline->>Stores: Launch Stealth Playwright
+        Stores-->>Pipeline: Raw HTML / Text
+    end
+    Pipeline->>LLM: Fallback extract JSON from generic text
+    LLM-->>Pipeline: List of Raw Listings
+    
+    Note over Pipeline: Stage 3: Extractor
+    Pipeline->>Pipeline: Clean currency/strings to integers/floats
+    
+    Note over Pipeline: Stage 4: Matcher
+    Pipeline->>Pipeline: Score Listings (Reject accessories, wrong variants)
+    
+    Note over Pipeline: Stage 5: Ranker
+    Pipeline->>Pipeline: Rank based on price, delivery, and trust weights
+    
+    Note over Pipeline: Post-Process: Explanation
+    Pipeline->>LLM: "Explain why offer #1 is the best"
+    LLM-->>Pipeline: AI Justification summary
+    
+    Pipeline-->>API: CompareResponse
+    API-->>Frontend: JSON Dashboard Data
+    Frontend-->>User: Visual Price Comparison & AI Recommendation
 ```
 
-### ⚠️ 2. Snapdeal `selector_error`
-```
-Root cause: Snapdeal's DOM structure doesn't match any of the 21 universal
-            patterns or the YAML selectors. LLM discovery ran but failed.
-Status:     Debug HTML saved at app/scraping/debug/snapdeal_no_container_*.html
-Next fix:   Open that HTML file, find the real product card selector,
-            update snapdeal.yaml selectors.search_results_container
+---
+
+## ⚙️ The Pipeline — End-to-End Workflow
+
+### Stage 1 — Planner (`planner.py`)
+- **Input:** Raw query string.
+- **Action:** Uses Groq (llama-3.3-70b-versatile) to extract structured fields `{brand, model, storage, ram, color, category, optimized_search_query}`.
+- **Resilience:** Regex fallback activated if the LLM rate limit triggers.
+- **Routing:** Dynamically selects marketplaces based on brand affinity (e.g., skips irrelevant sites).
+
+### Stage 2 — Scraper (`scraper.py` → `sgai_scraper.py`)
+- **Input:** Search query & chosen marketplaces.
+- **Action:**
+  - *Dedicated Sites (Amazon, Vijay Sales):* Direct HTML extraction using Playwright + BeautifulSoup. High speed, reliable CSS parsing.
+  - *Generic Sites:* Launches Playwright stealth instances, extracts clean viewport body text, and pipes it to Groq (llama-3.1-8b-instant) for intelligent, generalized JSON extraction.
+
+### Stage 3 — Extractor (`extractor.py`)
+- **Input:** Text-heavy `RawListing` objects.
+- **Action:** Highly aggressive Regex routines convert text strings into clean numeric structures (e.g., `"₹55,999"` → `55999.0`, `"Get it by Mon"` → `min/max delivery days`). Deals with deduplication.
+
+### Stage 4 — Matcher (`matcher.py`)
+- **Input:** Clean numerics + Intent Target.
+- **Action:** Scoring engine checks variant mismatches (S23 vs S24), invalidates accessories (charging blocks, covers), and computes a confidence score `[0.0 - 1.0]`. Low scores are pruned.
+
+### Stage 5 — Ranker (`ranker.py`)
+- **Input:** Verified matched offers.
+- **Action:** Adjusts rankings based on the user's focus (cheapest vs. fastest vs. most reliable). Injects aesthetic UI badges ("Best Price", "Most Trusted"). The `#1` ranked offer triggers the LLM explanation generator.
+
+---
+
+## 🚀 Tech Stack
+
+- **Frontend:** React.js, Vite, TailwindCSS (Responsive, Glassmorphic UI)
+- **Backend Core:** Python 3.11+, FastAPI (Async Orchestration)
+- **Scraping Engine:** Playwright (Stealth Plugins), BeautifulSoup4
+- **AI/LLM Layer:** Groq APIs, featuring Llama 3 70B (Deep extraction) and Llama 3 8B (Fast parsing).
+- **Concurrency:** `asyncio`, Semaphore-based LLM rate limiting.
+
+---
+
+## 💻 Installation & Setup
+
+### 1. Pre-requisites
+- Python 3.11+
+- Node.js v18+
+- Go to [Groq Console](https://console.groq.com/keys) to generate your API key.
+
+### 2. Backend Setup
+```bash
+# Clone the repository
+git clone https://github.com/SiddharajShirke/Ai-Powered-e-commerce-scraper-.git
+cd Ai-Powered-e-commerce-scraper-
+
+# Create virtual environment
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+
+# Install requirements
+pip install -r requirements.txt
+
+# Install stealth browsers
+playwright install
+playwright install-deps
+
+# Set up environment variables
+cp .env.example .env
+nano .env  # Add your GROQ_API_KEY
 ```
 
-### ⚠️ 3. Vijay Sales `0 listings` (selectors stale)
-```
-Root cause: Class names in vijay_sales.yaml don't match current live DOM
-Status:     Container found, but sub-selectors (title/price) produce no text
-Next fix:   Open site in browser DevTools, inspect product card classes,
-            update vijay_sales.yaml with real class names
-```
-
-### ⚠️ 4. Tata CLiQ Missing from Tests
-```
-Root cause: Not confirmed tested yet. Likely bot_challenge (Cloudflare)
-Next fix:   Same as point 1 — headed mode + delay increase
+### 3. Frontend Setup
+```bash
+cd frontend
+npm install
+npm run dev
 ```
 
-### ⚠️ 5. `delivery_days_max: null` Everywhere
+### 4. Running the Complete System
+Start the FastAPI server:
+```bash
+# In the root project directory (ensure venv is active)
+uvicorn app.main:app --reload --port 8000
 ```
-Root cause: Delivery text selectors not matching, delivery info is
-            often behind login or pincode modal on Indian sites
-Status:     LLM enrichment fills this for cards with no delivery text
-Next fix:   Add pincode pre-fill step in base.py _wait_for_content()
-            (inject a default Mumbai/Delhi pincode via JS before scraping)
-```
+Open `http://localhost:5173` in your browser.
 
-### ⚠️ 6. Frontend Not Connected to Live API
-```
-Status:     React + Vite + Tailwind scaffold provided and written
-            but not confirmed running alongside backend
-Next fix:   cd frontend && npm install && npm run dev
-            Then test at http://localhost:5173
-```
+---
 
-***
+## 📡 Essential API Routes
 
-## Current Working State
+- **`GET /`**: Server Heartbeat.
+- **`GET /health`**: LLM connectivity status & system readiness.
+- **`GET /api/marketplaces`**: Available vendor scraping modules.
+- **`POST /api/compare`**: The main orchestration endpoint. Triggers the 5-stage pipeline and returns the full `CompareResponse`. 
+- **`POST /api/debug/compare`**: Similar to above but dumps the `PipelineState` step by step for telemetry.
 
-```
-✅ Server starts cleanly          python run.py
-✅ Playwright starts              headless Chromium ready
-✅ LLM connected                  Groq llama-3.3-70b-versatile
-✅ 11 marketplaces loaded         from YAML registry
-✅ All scrapers importable        /api/health/scrapers → 9/9 ok
-✅ Pipeline executes              ~30-40s real scraping
-✅ Amazon scraping                1-5 listings returned
-✅ Vijay Sales                    container found
-✅ Query parsing                  LLM extracts brand/model/storage correctly
-✅ Match scoring                  regex + LLM hybrid scoring
-✅ Ranking                        4 modes working
-✅ Explanation                    LLM-generated text
-⚠️  5 sites bot-challenged        need headed mode or proxies
-⚠️  Snapdeal selector broken      needs YAML update from live DOM
-⚠️  Delivery data sparse          pincode modal blocking
-⏳ Frontend                       code ready, npm install needed
-```
+---
+*Built to bring total transparency and speed to consumer price discovery.*

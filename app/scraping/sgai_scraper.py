@@ -23,6 +23,7 @@ from typing import List, Tuple, Optional, Dict
 from urllib.parse import quote_plus, urlparse
 
 from groq import Groq as _Groq
+from groq import APIConnectionError as _GroqConnectionError
 
 from app.schemas import RawListing, SiteStatus, SiteStatusCode
 from app.marketplaces.registry import marketplace_registry, MarketplaceConfig
@@ -160,7 +161,13 @@ _groq_client: Optional[_Groq] = None
 def _get_groq_client() -> _Groq:
     global _groq_client
     if _groq_client is None:
-        _groq_client = _Groq(api_key=settings.groq_api_key)
+        key = (settings.groq_api_key or "").strip()
+        if not key:
+            raise ValueError(
+                "GROQ_API_KEY is not set in .env — cannot call Groq LLM. "
+                "Get a free key at https://console.groq.com and add it to your .env file."
+            )
+        _groq_client = _Groq(api_key=key)
     return _groq_client
 
 
@@ -198,6 +205,33 @@ def _build_llm_input(page_text: str, word_budget: int) -> str:
     # Strip image markers (saves tokens)
     text = re.sub(r'\[IMG:[^\]]{0,500}\]', '', text)
 
+    # Shorten long URL markers but KEEP enough for valid product URLs
+    def _shorten_url_marker(m: re.Match) -> str:
+        url = m.group(1).strip()
+        try:
+            parsed = urlparse(url)
+            # Keep path + essential query params (pid, productId, itemId, etc.)
+            path = parsed.path
+            if parsed.query:
+                # Keep only product-identifying query params, drop tracking noise
+                from urllib.parse import parse_qs, urlencode
+                keep_keys = {
+                    "pid", "productid", "itemid", "skuid", "id", "product_id",
+                    "item_id", "sku", "q", "productId", "itemId", "skuId",
+                }
+                qs = parse_qs(parsed.query)
+                kept = {k: v[0] for k, v in qs.items()
+                        if k.lower() in {x.lower() for x in keep_keys}}
+                if kept:
+                    path = f"{path}?{urlencode(kept)}"
+            # Keep up to 250 chars (product URLs can be long on Indian sites)
+            short = path[:250]
+            return f"[URL:{short}]"
+        except Exception:
+            return f"[URL:{url[:250]}]"
+
+    text = re.sub(r'\[URL:([^\]]{0,2000})\]', _shorten_url_marker, text)
+
     # Remove noise
     for pattern in _NOISE_PATTERNS:
         text = re.sub(pattern, '\n', text)
@@ -206,48 +240,73 @@ def _build_llm_input(page_text: str, word_budget: int) -> str:
     text = re.sub(r'\n{3,}', '\n\n', text)
     text = re.sub(r'[ \t]{2,}', ' ', text)
 
+    # Word-level truncation
     words = text.split()
-    return ' '.join(words[:word_budget])
+    text = ' '.join(words[:word_budget])
+
+    # Character-level cap — Groq has request size limits (~6K tokens ≈ ~24K chars)
+    _MAX_CHARS = 8000
+    if len(text) > _MAX_CHARS:
+        text = text[:_MAX_CHARS]
+
+    return text
 
 
 # ── LLM prompt ──────────────────────────────────────────────────────────────
 
 def _build_prompt(search_query: str, max_results: int) -> str:
     return (
-        f"Extract up to {max_results} product listings for '{search_query}' "
+        f"Extract EXACTLY up to {max_results} product listings for '{search_query}' "
         f"from this Indian e-commerce search results page.\n\n"
-        f"CRITICAL RULES:\n"
-        f"- price_text: The CURRENT SELLING PRICE shown on the page. "
-        f"Indian prices use formats like: Rs 55,999 or Rs.1,29,999 or 55,999 or INR 55999. "
-        f"Extract the EXACT price string as shown. This is the MOST IMPORTANT field.\n"
-        f"- original_price_text: The MRP / strikethrough / crossed-out price if different from selling price. null if not shown.\n"
-        f"- listing_url: Extract from [URL:/path/to/product] markers near each product. "
-        f"Use the URL that points to a product detail page.\n"
-        f"- title: Full product name including brand, model, variant. No 'Add to Cart' text.\n"
+        f"═══ STRICT RELEVANCE RULES (100% MATCH REQUIRED) ═══\n"
+        f"1. ONLY extract products whose title contains the EXACT brand AND model from '{search_query}'.\n"
+        f"   Example: query='Samsung Galaxy S24 128GB' → ONLY extract products with 'Samsung' AND 'Galaxy S24' in title.\n"
+        f"   REJECT: different brands (OnePlus, Xiaomi, Apple, etc.), different models (S23, S25, A54, etc.),\n"
+        f"   phone cases, covers, screen guards, cables, chargers, accessories.\n"
+        f"2. If the query specifies a storage variant (e.g. 128GB), prefer that variant but also accept\n"
+        f"   other storage variants of the SAME model.\n"
+        f"3. NEVER extract trending items, 'you might also like', 'customers also bought', or sponsored ads\n"
+        f"   for DIFFERENT products.\n"
+        f"4. If fewer than {max_results} relevant products exist on the page, return ONLY those. Do NOT pad with irrelevant items.\n\n"
+        f"═══ FIELD EXTRACTION RULES ═══\n"
+        f"- title: Full product name with brand, model, storage, color. No 'Add to Cart' or 'Buy Now' text.\n"
+        f"- price_text: The CURRENT SELLING PRICE on the page. Indian formats: Rs 55,999 | Rs.1,29,999 | 55,999 | INR 55999.\n"
+        f"  Extract the EXACT price string. This is the MOST IMPORTANT field. If you see numbers like 55999 near a product, that IS the price.\n"
+        f"- original_price_text: MRP / strikethrough price if different from selling price. null if same or not shown.\n"
+        f"- listing_url: Extract from [URL:/path/to/product] markers near each product.\n"
+        f"  Use the URL that leads to the product DETAIL page (not category/search page).\n"
+        f"  This MUST be a real path from the page text — NEVER invent or hallucinate a URL.\n"
         f"- rating_text: Star rating (e.g. '4.3'). null if not shown.\n"
         f"- review_count_text: Number of ratings/reviews. null if not shown.\n"
         f"- delivery_text: Delivery estimate if shown. null if not visible.\n"
         f"- image_url: null (not needed).\n"
         f"- seller_text: Seller name if shown. null if not shown.\n"
         f"- return_policy_text: null.\n\n"
-        f"Return REAL products only. Skip accessories, cases, cables unless the query asks for them.\n"
-        f"Do NOT hallucinate or invent data. If a field is not visible, use null.\n"
-        f"IMPORTANT: You MUST extract price_text for every product. If you see numbers like "
-        f"55999 or 55,999 near a product title, that IS the price."
+        f"═══ ABSOLUTE PROHIBITIONS ═══\n"
+        f"- Do NOT hallucinate or invent ANY data. Every field must come from the page text.\n"
+        f"- Do NOT fabricate URLs. If no [URL:...] marker is near a product, set listing_url to null.\n"
+        f"- Do NOT include accessories, cases, covers, screen guards, cables, adapters unless the query explicitly asks for them."
     )
 
 
 _SYSTEM_PROMPT = (
     "You are an expert product data extractor for Indian e-commerce websites. "
     "You read raw page text and extract structured product data.\n\n"
-    "CRITICAL: Indian prices appear as: Rs 55,999 | Rs. 1,29,999 | INR 55999 | "
+    "CRITICAL PRICE FORMAT: Indian prices appear as: Rs 55,999 | Rs. 1,29,999 | INR 55999 | "
     "just bare numbers like 55999 near product names. "
     "Indian lakhs format: 1,29,999 means 129999 (one lakh twenty nine thousand).\n\n"
+    "STRICT RELEVANCE: ONLY extract products whose title contains the EXACT brand "
+    "AND model from the search query. A product is relevant ONLY if the brand name "
+    "and model number/name both appear in its title. "
+    "Do NOT extract trending items, 'you might also like', or products from a "
+    "DIFFERENT brand or model. If query is 'Samsung Galaxy S24' → ONLY Samsung Galaxy S24 variants.\n\n"
+    "URL EXTRACTION: Look for [URL:/some/path] markers in the text near each product. "
+    "Use the URL path that leads to the product detail page. "
+    "NEVER invent or fabricate a URL. If no [URL:...] marker is near a product, set listing_url to null.\n\n"
     "Return ONLY a valid JSON object with key 'products' containing an array. "
     "Each product: {title, price_text, original_price_text, rating_text, "
     "review_count_text, delivery_text, listing_url, image_url, seller_text, "
-    "return_policy_text}.\n\n"
-    "For listing_url: extract from [URL:/some/path] markers in the text.\n"
+    "return_policy_text}.\n"
     "Use null for missing fields. No markdown fences. Raw JSON ONLY."
 )
 
@@ -326,6 +385,21 @@ _EXTRACT_TEXT_JS = """
         document.querySelectorAll('[style*="display: none"], [style*="display:none"], [hidden]')
             .forEach(el => el.remove());
 
+        // Remove navigation / header / footer noise to save LLM tokens
+        ['nav', 'header', 'footer'].forEach(tag => {
+            document.querySelectorAll(tag).forEach(el => el.remove());
+        });
+        // Also remove common noise containers by role or class
+        document.querySelectorAll(
+            '[role="navigation"], [role="banner"], [role="contentinfo"], ' +
+            '[class*="navbar"], [class*="Navbar"], [class*="NavBar"], ' +
+            '[class*="header-menu"], [class*="HeaderMenu"], ' +
+            '[class*="footer"], [class*="Footer"], ' +
+            '[class*="sidebar"], [class*="SideBar"], [class*="Sidebar"], ' +
+            '[class*="mega-menu"], [class*="MegaMenu"], ' +
+            '[class*="cookie"], [class*="Cookie"]'
+        ).forEach(el => el.remove());
+
         // Inject URL markers next to links
         document.querySelectorAll('a[href]').forEach(a => {
             try {
@@ -346,15 +420,74 @@ _EXTRACT_TEXT_JS = """
 }
 """
 
+# Targeted extraction JS: extracts text only from product container area
+# Used when we have a ready_selector that matched — we know where products are
+_EXTRACT_PRODUCTS_JS = """
+(containerSelector) => {
+    try {
+        // Find ALL matching product containers
+        const containers = document.querySelectorAll(containerSelector);
+        if (!containers || containers.length === 0) return '';
 
-async def _fetch_html_playwright(url: str, site_key: str, attempt: int = 1) -> str:
+        // Collect text from all product containers, injecting URL markers
+        let texts = [];
+        containers.forEach(c => {
+            // Inject URL markers for links INSIDE the container
+            c.querySelectorAll('a[href]').forEach(a => {
+                try {
+                    const href = a.getAttribute('href') || '';
+                    if (href && href !== '#' && href.length > 3 &&
+                        !href.startsWith('javascript:') &&
+                        (href.startsWith('/') || href.startsWith('http'))) {
+                        a.appendChild(document.createTextNode(' [URL:' + href + '] '));
+                    }
+                } catch(e) {}
+            });
+
+            let t = c.innerText.trim();
+
+            // Check if container's parent/ancestor is an <a> with href
+            // (common pattern: link wraps the card, not inside it)
+            let parent = c.parentElement;
+            for (let i = 0; i < 3 && parent; i++) {
+                if (parent.tagName === 'A' && parent.href) {
+                    try {
+                        const href = parent.getAttribute('href') || '';
+                        if (href && href.length > 3 && !href.startsWith('javascript:')) {
+                            t += ' [URL:' + href + ']';
+                            break;
+                        }
+                    } catch(e) {}
+                }
+                parent = parent.parentElement;
+            }
+
+            if (t) texts.push(t);
+        });
+        return texts.join('\\n\\n');
+    } catch(e) {
+        return '';
+    }
+}
+"""
+
+
+async def _fetch_html_playwright(
+    url: str, site_key: str, attempt: int = 1,
+    ready_selector: Optional[str] = None,
+) -> Tuple[str, bool]:
     """
     Fetch page text using stealth Chromium.
     Uses anti-detection JS patches, random UA, realistic viewport.
+
+    Returns (page_text, ready_selector_matched).
+    ready_selector_matched is True when ready_selector was found on the page,
+    False if it timed out, or True when no ready_selector was provided.
     """
     from playwright.async_api import async_playwright
 
     html = ""
+    selector_matched = True  # assume OK if no selector configured
     ua = random.choice(_USER_AGENTS)
     wait_time = _SITE_WAIT.get(site_key, 3.5)
 
@@ -362,7 +495,7 @@ async def _fetch_html_playwright(url: str, site_key: str, attempt: int = 1) -> s
         async with async_playwright() as p:
             # Launch with anti-detection args
             browser = await p.chromium.launch(
-                headless=settings.playwright_headless,
+                headless=True,  # Always headless — backend-only, never opens a window
                 args=[
                     "--disable-blink-features=AutomationControlled",
                     "--disable-features=IsolateOrigins,site-per-process",
@@ -415,6 +548,24 @@ async def _fetch_html_playwright(url: str, site_key: str, attempt: int = 1) -> s
 
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
+            # Wait for search results to render (SPA sites like Croma/Reliance)
+            if ready_selector:
+                try:
+                    await page.wait_for_selector(
+                        ready_selector, state="attached", timeout=10000,
+                    )
+                    logger.info(
+                        "[%s] ready_selector '%s' found",
+                        site_key, ready_selector,
+                    )
+                    selector_matched = True
+                except Exception:
+                    logger.warning(
+                        "[%s] ready_selector '%s' not found within 10s — continuing",
+                        site_key, ready_selector,
+                    )
+                    selector_matched = False
+
             # Wait for JS hydration
             await asyncio.sleep(wait_time + random.uniform(0.5, 1.5))
 
@@ -429,8 +580,25 @@ async def _fetch_html_playwright(url: str, site_key: str, attempt: int = 1) -> s
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight * 0.2)")
             await asyncio.sleep(0.5)
 
-            # Extract text with URL markers
-            html = await page.evaluate(_EXTRACT_TEXT_JS)
+            # Extract text — prefer targeted extraction from product containers
+            if ready_selector and selector_matched:
+                # First try targeted: extract text only from product card elements
+                html = await page.evaluate(_EXTRACT_PRODUCTS_JS, ready_selector)
+                if html and len(html.strip()) > 100:
+                    logger.info(
+                        "[%s] Targeted extraction from '%s': %d chars",
+                        site_key, ready_selector, len(html),
+                    )
+                else:
+                    # Fall back to full-page extraction (with nav stripped)
+                    logger.info(
+                        "[%s] Targeted extraction too short (%d chars), falling back to full page",
+                        site_key, len(html or ""),
+                    )
+                    html = await page.evaluate(_EXTRACT_TEXT_JS)
+            else:
+                # No selector or not matched — use full-page extraction
+                html = await page.evaluate(_EXTRACT_TEXT_JS)
 
             logger.info("[%s] Fetched %d chars of page text", site_key, len(html))
 
@@ -439,7 +607,7 @@ async def _fetch_html_playwright(url: str, site_key: str, attempt: int = 1) -> s
     except Exception as e:
         logger.error("[%s] Playwright fetch error: %s", site_key, str(e)[:150])
 
-    return html
+    return html, selector_matched
 
 
 # ── URL / field cleaners ────────────────────────────────────────────────────
@@ -448,6 +616,21 @@ _FAKE_DOMAINS = {
     "example.com", "placeholder.com", "domain.com",
     "website.com", "url.com", "product.com", "test.com",
 }
+
+# ── Generic "no results" phrases (checked on ALL sites) ─────────────────────
+
+_GENERIC_NO_RESULTS_PHRASES = [
+    "sorry, no results found",
+    "no results found",
+    "no products found",
+    "didn't match any products",
+    "did not match any products",
+    "we couldn't find",
+    "could not find any results",
+    "0 results for",
+    "no items found",
+    "no matching results",
+]
 _NULL_VALS = {
     "none", "null", "n/a", "na", "", "not available",
     "not found", "not visible", "[url]", "[img]",
@@ -461,20 +644,28 @@ def _clean_url(raw: Optional[str], base_url: str) -> str:
     raw = raw.strip()
     if raw.lower() in _NULL_VALS:
         return ""
+    # Strip [URL:...] wrapper if LLM kept it
     if raw.startswith("[URL:"):
         raw = raw[5:].rstrip("]").strip()
-    if not raw or raw.lower() == "[url]":
+    if not raw or raw.lower() in ("[url]", "[url:]", "url"):
         return ""
+    # Reject fake/hallucinated domains
     try:
-        domain = urlparse(raw).netloc.lower().replace("www.", "")
+        parsed = urlparse(raw)
+        domain = (parsed.netloc or "").lower().replace("www.", "")
         if domain in _FAKE_DOMAINS:
             return ""
     except Exception:
-        return ""
+        pass
+    # Already absolute
     if raw.startswith("http"):
         return raw
+    # Relative path → prepend base_url
     if raw.startswith("/"):
         return base_url.rstrip("/") + raw
+    # Looks like a relative path without leading slash (e.g. "dp/B0xxx")
+    if any(raw.startswith(prefix) for prefix in ("dp/", "p/", "search/", "product")):
+        return base_url.rstrip("/") + "/" + raw
     return ""
 
 
@@ -552,7 +743,10 @@ async def scrape_one_site(
     # Try up to 2 attempts (fresh browser context each time)
     for attempt in range(1, 3):
         try:
-            raw_text = await _fetch_html_playwright(url, config.key, attempt)
+            raw_text, selector_matched = await _fetch_html_playwright(
+                url, config.key, attempt,
+                ready_selector=config.ready_selector,
+            )
 
             if not raw_text or len(raw_text.strip()) < 100:
                 status.status  = SiteStatusCode.NO_RESULTS
@@ -579,6 +773,48 @@ async def scrape_one_site(
                 if attempt < 2:
                     await asyncio.sleep(random.uniform(3.0, 6.0))
                     continue
+                return [], status
+
+            # ── "No results" detection ──────────────────────────────────
+            # Combine config-specific phrases with generic ones
+            no_results_phrases = list(_GENERIC_NO_RESULTS_PHRASES)
+            if config.no_results_phrases:
+                no_results_phrases.extend(
+                    p.lower() for p in config.no_results_phrases
+                )
+
+            no_results_hit = None
+            for phrase in no_results_phrases:
+                if phrase in text_lower:
+                    no_results_hit = phrase
+                    break
+
+            # If explicit "no results" text is found on the page, skip LLM
+            if no_results_hit:
+                status.status  = SiteStatusCode.NO_RESULTS
+                status.message = (
+                    f"No results on {config.name} (page says: '{no_results_hit}')"
+                )
+                logger.info(
+                    "[%s] No-results phrase detected: '%s' — skipping LLM",
+                    config.key, no_results_hit,
+                )
+                return [], status
+
+            # If ready_selector was configured but timed out, the product
+            # grid never appeared.  The page text is likely default/trending
+            # items, NOT search results.  Return empty to avoid hallucinated
+            # matches.
+            if config.ready_selector and not selector_matched:
+                status.status  = SiteStatusCode.NO_RESULTS
+                status.message = (
+                    f"Product grid did not load on {config.name} "
+                    f"(ready_selector timed out)"
+                )
+                logger.info(
+                    "[%s] ready_selector timed out — treating as no results",
+                    config.key,
+                )
                 return [], status
 
             # Prepare LLM input
@@ -618,6 +854,25 @@ async def scrape_one_site(
                     await asyncio.sleep(random.uniform(2.0, 4.0))
                     continue
                 return [], status
+
+        except _GroqConnectionError as err:
+            # Empty or invalid API key → Groq SDK raises APIConnectionError
+            status.status  = SiteStatusCode.ERROR
+            status.message = (
+                "Groq API key missing or invalid — set GROQ_API_KEY in .env"
+            )
+            logger.error(
+                "[%s] Groq APIConnectionError (likely missing API key): %s",
+                config.key, str(err)[:120],
+            )
+            return [], status  # Don't retry — key won't fix itself
+
+        except ValueError as err:
+            # Raised by our own _get_groq_client validation
+            status.status  = SiteStatusCode.ERROR
+            status.message = str(err)[:120]
+            logger.error("[%s] %s", config.key, str(err)[:120])
+            return [], status
 
         except Exception as err:
             err_str   = str(err)
@@ -673,6 +928,26 @@ async def _scrape_with_semaphore(
         return await scrape_one_site(config, search_query, max_results)
 
 
+# ── Dedicated HTTP+BS4 scrapers (no Playwright needed) ───────────────────────
+
+_DEDICATED_SCRAPERS: Dict[str, object] = {}
+
+def _get_dedicated_scraper(site_key: str):
+    """Lazily instantiate dedicated scrapers so imports happen only once."""
+    if site_key not in _DEDICATED_SCRAPERS:
+        if site_key == "amazon":
+            from app.scraping.amazon import AmazonScraper
+            _DEDICATED_SCRAPERS[site_key] = AmazonScraper()
+        elif site_key == "vijay_sales":
+            from app.scraping.vijay_sales import VijaySalesScraper
+            _DEDICATED_SCRAPERS[site_key] = VijaySalesScraper()
+    return _DEDICATED_SCRAPERS.get(site_key)
+
+
+# Sites that have a dedicated HTTP+BS4 scraper (skip Playwright for these)
+_DEDICATED_SITE_KEYS = {"amazon", "vijay_sales"}
+
+
 async def run_sgai_orchestrator(
     search_query:         str,
     marketplace_keys:     List[str],
@@ -693,11 +968,24 @@ async def run_sgai_orchestrator(
         logger.error("No enabled configs for keys: %s", marketplace_keys)
         return [], []
 
-    # Run all sites in parallel (semaphore limits concurrent browsers to 3)
-    tasks = [
-        _scrape_with_semaphore(cfg, search_query, max_results_per_site)
-        for cfg in configs
-    ]
+    # Split into dedicated scrapers vs Playwright+LLM sites
+    tasks = []
+    for cfg in configs:
+        scraper = _get_dedicated_scraper(cfg.key)
+        if scraper is not None:
+            # Dedicated HTTP+BS4 scraper — runs in thread pool, no browser
+            logger.info("[%s] Using dedicated HTTP+BS4 scraper", cfg.key)
+            tasks.append(
+                scraper.async_scrape(
+                    search_query, max_results_per_site,
+                    cfg.key, cfg.name,
+                )
+            )
+        else:
+            # Default: Playwright+LLM path (semaphore-limited)
+            tasks.append(
+                _scrape_with_semaphore(cfg, search_query, max_results_per_site)
+            )
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -725,3 +1013,4 @@ async def run_sgai_orchestrator(
         len(all_listings), ok, len(all_statuses),
     )
     return all_listings, all_statuses
+
