@@ -15,234 +15,212 @@ Also includes a standalone **AI Shopping Chatbot** that fetches live prices from
 
 ---
 
-## Features
+## Features (Detailed)
 
-### Feature 1 — Price Comparison Pipeline (LangGraph)
-
+### 1. Price Comparison Pipeline (LangGraph)
 - **6-stage agentic pipeline** orchestrated by LangGraph `StateGraph`:
-  `Planner → Scrapers (parallel) → Extractor → Matcher → Ranker → Explainer`
-- **12 Indian marketplace scrapers** — Amazon, Flipkart, Croma, JioMart, Meesho, Snapdeal, Tata CLiQ, Reliance Digital, Samsung Shop, Vijay Sales, Paytm Mall, Shopsy
-- **Dual scraping approaches**:
-  - **Approach 1**: Playwright stealth + Groq Llama 3.1 8B extraction (most sites)
-  - **Approach 2**: Playwright stealth + BeautifulSoup4 CSS parsing (Amazon, Vijay Sales)
-- **LLM intelligence** — query parsing, product matching, CSS selector discovery, natural-language recommendations (Groq Llama 3.3 70B)
-- **4 ranking modes** — Cheapest / Fastest Delivery / Most Reliable / Balanced
-- **SSE streaming** — real-time progress events per marketplace
-- **Delivery info extraction** — parsed delivery days + raw text, marketplace-specific fallbacks
-- **Product image thumbnails** — extracted from product cards
-- **Working product URLs** — cleaned per-site (Amazon `/dp/ASIN`, Flipkart `?pid=`), with search-URL fallback
+  - **Planner:** Parses user query, selects marketplaces
+  - **Scrapers:** Parallel scraping of 12+ Indian marketplaces
+  - **Extractor:** Normalizes raw listings, cleans URLs, parses prices/delivery
+  - **Matcher:** Multi-gate product matching, LLM semantic fallback
+  - **Ranker:** Mode-aware scoring (Cheapest, Fastest, Reliable, Balanced)
+  - **Explainer:** AI-generated recommendation for best offer
+- **LLM intelligence:** Groq Llama 3.3 70B for query parsing, matching, selector discovery, and recommendations
+- **SSE streaming:** Real-time progress events per marketplace
+- **Delivery info extraction:** Parsed delivery days, marketplace-specific fallbacks
+- **Product image thumbnails:** Extracted from product cards
+- **Working product URLs:** Cleaned per-site, search-URL fallback
 
-### Feature 2 — AI Shopping Chatbot
+### 2. Watchlist & Alerts
+- **Save products to watchlist** with custom price drop thresholds
+- **AI-generated email alerts** sent via Gmail SMTP when price drops or item is added
+- **Automated scheduler** checks prices every 6 hours, sends alerts
+- **SQLite fallback database** for watchlist and price history
 
-- **3-step pipeline**: Intent Classification → SerpAPI Google Shopping → Groq LLM Response
-- **4 intent types**: `product_search`, `comparison`, `recommendation`, `general`
-- **Live product data** from Google Shopping India via SerpAPI
-- **Product cards** with thumbnail, price, star rating, source, delivery, and working "View Deal" links
-- **Conversational AI** — context-aware responses with chat history
+### 3. AI Shopping Chatbot
+- **Intent classification** (Groq LLM)
+- **Live Google Shopping prices** via SerpAPI
+- **Conversational AI** with context-aware responses
+- **Product cards** with thumbnail, price, rating, delivery, and "View Deal" links
 
-### Frontend
-
-- **React 18 + Vite** single-page application
-- **Dark-mode UI** with glassmorphic design, CSS variables
-- **Offer cards** — rank badge, platform icon, price with discount %, delivery info with truck icon, seller/rating metadata, gradient CTA button, score breakdown bars
-- **Live progress tracking** — SSE events show scraping/matching/ranking stages in real-time
-- **Chatbot overlay** — floating "Ask AI" button, product card grid with rank badges (gold/silver/bronze), star ratings, quick suggestion chips
+### 4. Modern Frontend
+- **React 18 + Vite SPA**
+- **Dark theme, glassmorphic UI**
+- **Offer cards** with rank badge, platform icon, price, delivery, seller/rating, CTA button
+- **Live progress tracking** (SSE)
+- **Chatbot overlay** with floating "Ask AI" button
+- **Watchlist modal:** Full-screen blur, threshold pills, success animation
 
 ---
 
-## System Architecture
+## System Architecture (Detailed)
 
 ```mermaid
 graph TD
-    classDef agent fill:#f9f,stroke:#333,stroke-width:2px
-    classDef data fill:#e1f5fe,stroke:#01579b,stroke-width:1px
-    classDef ext fill:#fff3e0,stroke:#e65100,stroke-width:1px
+    User[User (Web Browser)]
+    FE[Frontend (React + Vite)]
+    API[Backend API (FastAPI)]
+    DB[(SQLite DB)]
+    LLM[Groq LLM (AI)]
+    SMTP[Gmail SMTP (Email)]
+    Scrapers[Marketplace Scrapers]
+    Scheduler[Price Monitor Scheduler]
 
-    User[User / Frontend] -->|POST /api/compare| API[FastAPI + SSE]
-    User -->|POST /api/chat| Chat[Chatbot Endpoint]
-
-    subgraph "LangGraph 6-Stage Pipeline"
-        P[1. Planner]:::agent -->|fan-out| S1[Scraper: Amazon]:::agent
-        P -->|fan-out| S2[Scraper: Flipkart]:::agent
-        P -->|fan-out| S3[Scraper: Croma ...]:::agent
-        S1 -->|fan-in| E[3. Extractor]:::agent
-        S2 --> E
-        S3 --> E
-        E --> M[4. Matcher]:::agent
-        M -->|retry?| P
-        M --> R[5. Ranker]:::agent
-        R --> X[6. Explainer]:::agent
-    end
-
-    subgraph "Chatbot Pipeline"
-        I[Intent Classifier]:::agent --> SR[SerpAPI Search]:::ext
-        SR --> RE[LLM Responder]:::agent
-    end
-
-    API --> P
-    X --> API
-    Chat --> I
-    RE --> Chat
-
-    P -.-> Groq1[Groq Llama 3.3 70B]:::ext
-    S3 -.-> Groq2[Groq Llama 3.1 8B]:::ext
-    X -.-> Groq1
-    I -.-> Groq1
-    RE -.-> Groq1
-    S1 -.-> PW[Playwright + BS4]:::ext
-    S2 -.-> PW
+    User --> FE
+    FE -->|REST API| API
+    API -->|CRUD| DB
+    API -->|Run Scraper| Scrapers
+    API -->|Generate Email| LLM
+    API -->|Send Email| SMTP
+    API -->|Schedule Checks| Scheduler
+    Scheduler -->|Periodic Price Check| Scrapers
+    Scrapers -->|Results| API
+    API --> FE
 ```
 
----
-
-## Pipeline Stages
-
-### Stage 1 — Planner (`agents/planner.py`)
-Parses the natural-language query using Groq Llama 3.3 70B to extract `{brand, model, storage, RAM, color, category}`. Selects target marketplaces based on product category and brand affinity. Falls back to regex parsing if LLM rate-limited.
-
-### Stage 2 — Scrapers (`agents/scraper.py`)
-**All scrapers run in parallel** (LangGraph fan-out). Each marketplace has a dedicated scraper node:
-- **Amazon, Vijay Sales** — Playwright stealth + BeautifulSoup4 (CSS selectors, no LLM needed)
-- **All other sites** — `sgai_scraper.py`: Playwright stealth fetch → inject `[URL:]` and `[IMG:]` markers → Groq Llama 3.1 8B extracts structured JSON
-
-### Stage 3 — Extractor (`agents/extractor.py`)
-Normalizes raw listings into `NormalizedOffer` objects:
-- Price parsing: `"₹55,999"` → `55999.0`
-- Delivery parsing: `"Get it by Monday"` → `(1, 3) days`
-- URL cleaning: Amazon `/dp/ASIN`, Flipkart `path?pid=`, tracking param stripping
-- Fallback delivery estimates per marketplace when scraper returns nothing
-- Deduplication by URL or `(platform, title)` fingerprint
-
-### Stage 4 — Matcher (`agents/matcher.py`)
-6-gate hard rejection + weighted scoring:
-- Type gate (phone ≠ laptop), Brand gate, Model gate, Storage gate, Category gate, Accessory gate
-- Composite match score `[0.0–1.0]`; threshold = 0.4
-- Optional LLM semantic matching for uncertain scores (`llm_matcher.py`)
-- Retry loop: if 0 matches and < 2 attempts → retry from Planner
-
-### Stage 5 — Ranker (`agents/ranker.py`)
-Mode-aware composite scoring:
-| Mode | Price Weight | Delivery Weight | Trust Weight |
-|---|---|---|---|
-| Cheapest | 0.70 | 0.10 | 0.20 |
-| Fastest | 0.20 | 0.60 | 0.20 |
-| Reliable | 0.15 | 0.15 | 0.70 |
-| Balanced | 0.40 | 0.30 | 0.30 |
-
-Assigns badges: Best Price, Fastest Delivery, Most Trusted, Recommended.
-
-### Stage 6 — Explainer (`agents/llm_ranker.py`)
-Generates a natural-language AI recommendation via Groq Llama 3.3 70B explaining why the #1 offer is the best choice.
+- **Frontend:** React SPA, communicates with backend via REST API
+- **Backend:** FastAPI app, orchestrates pipeline, watchlist, chatbot, and email
+- **Database:** SQLite (fallback, async) for watchlist and price history
+- **LLM:** Groq API for query parsing, matching, extraction, recommendations, and email content
+- **Email:** Gmail SMTP for sending alerts and confirmations
+- **Scrapers:** Playwright-based modules for each marketplace
+- **Scheduler:** APScheduler for periodic price checks and alerting
 
 ---
 
-## Tech Stack
+## End-to-End Workflow (Step-by-Step)
 
-| Layer | Technology |
-|---|---|
-| **Frontend** | React 18, Vite 6, CSS Variables (dark mode) |
-| **Backend** | Python 3.11+, FastAPI, Uvicorn (async) |
-| **Pipeline** | LangGraph StateGraph with parallel fan-out/fan-in |
-| **LLM** | Groq — Llama 3.3 70B Versatile + Llama 3.1 8B Instant |
-| **Scraping** | Playwright (stealth anti-detection), BeautifulSoup4, lxml |
-| **Chatbot** | SerpAPI Google Shopping + Groq conversational LLM |
-| **Caching** | Redis (optional, 5-min TTL) |
-| **Config** | YAML marketplace configs, Pydantic Settings, `.env` |
-| **Dev** | Watchfiles hot-reload, Vite HMR proxy |
+1. **User** searches for a product or interacts with the chatbot on the frontend.
+2. **Frontend** sends request to **Backend API** (`/api/compare` or `/api/chat`).
+3. **API** triggers the LangGraph pipeline:
+    - **Planner** parses query, selects marketplaces
+    - **Scrapers** run in parallel, fetch product listings
+    - **Extractor** normalizes data, cleans URLs, parses prices/delivery
+    - **Matcher** matches products, scores offers
+    - **Ranker** ranks offers by mode (Cheapest, Fastest, Reliable, Balanced)
+    - **Explainer** generates AI recommendation
+4. **API** streams results to frontend (SSE) or returns JSON.
+5. **User** can save products to watchlist (with threshold).
+6. **API** saves watchlist item, sends AI-generated confirmation email via Gmail SMTP.
+7. **Scheduler** runs every 6 hours, checks prices, sends price drop alerts.
+8. **Frontend** displays results, watchlist, and notifications.
 
 ---
 
-## Installation & Setup
+## Installation & Setup (Step-by-Step)
 
 ### Prerequisites
-
 - **Python 3.11+**
 - **Node.js 18+** and npm
-- **Groq API Key** — get one free at [console.groq.com/keys](https://console.groq.com/keys)
-- **SerpAPI Key** *(optional, for chatbot)* — get one at [serpapi.com](https://serpapi.com/)
+- **Groq API Key** (required)
+- **SerpAPI Key** (optional, for chatbot)
+- **Gmail App Password** (for email alerts)
 
-### 1. Clone & Setup Backend
-
+### Backend Setup
 ```bash
 git clone https://github.com/SiddharajShirke/Ai-Powered-e-commerce-scraper-.git
 cd Ai-Powered-e-commerce-scraper-
-
-# Create virtual environment
 python -m venv .venv
-
-# Activate it
-# Linux/Mac:
-source .venv/bin/activate
-# Windows:
 .venv\Scripts\activate
-
-# Install Python dependencies
 pip install -r requirements.txt
-
-# Install Playwright Chromium browser
 playwright install chromium
 ```
 
-### 2. Configure Environment
-
+### Environment Configuration
 ```bash
 cp .env.example .env
 ```
-
 Edit `.env` and add your API keys:
-
 ```dotenv
-# REQUIRED — Groq LLM (free tier available)
 GROQ_API_KEY=your_groq_api_key_here
-
-# OPTIONAL — SerpAPI for chatbot Google Shopping
 SERPAPI_KEY=your_serpapi_key_here
+SMTP_USER=your_gmail_address
+SMTP_PASSWORD=your_gmail_app_password
 ```
 
-### 3. Setup Frontend
-
+### Frontend Setup
 ```bash
 cd frontend
 npm install
 ```
 
-### 4. Run the Application
-
-**Terminal 1 — Backend:**
+### Running the Application
+**Backend:**
 ```bash
-# From project root (venv activated)
 python run.py
-# → Server at http://127.0.0.1:8000
-# → Hot-reload watches app/ for .py and .yaml changes
 ```
-
-**Terminal 2 — Frontend:**
+**Frontend:**
 ```bash
 cd frontend
 npm run dev
-# → UI at http://localhost:5173
 ```
-
-Open **http://localhost:5173** in your browser.
-
-> **Without hot-reload:** `python run.py --no-reload`
+Open [http://localhost:5173](http://localhost:5173) in your browser.
 
 ---
 
-## API Endpoints
+## Pipeline Stages (Detailed)
 
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/` | Server heartbeat |
-| `GET` | `/health` | System readiness + LLM connectivity |
-| `GET` | `/api/marketplaces` | List all configured marketplace scrapers |
-| `POST` | `/api/compare` | **Main endpoint** — triggers the 6-stage LangGraph pipeline. Returns SSE stream with real-time progress events, or JSON fallback. |
-| `POST` | `/api/compare/sync` | Synchronous JSON-only version (no SSE) |
-| `POST` | `/api/chat` | **Chatbot endpoint** — Intent → SerpAPI → LLM response |
-| `POST` | `/api/debug/compare` | Debug mode — returns full pipeline state |
+### Stage 1 — Planner (`agents/planner.py`)
+- Parses query using Groq LLM
+- Extracts product attributes (brand, model, storage, RAM, color, category)
+- Selects target marketplaces
+- Fallback to regex parsing if LLM fails
+
+### Stage 2 — Scrapers (`agents/scraper.py`)
+- Parallel scraping of all marketplaces
+- Playwright stealth browser for anti-detection
+- Amazon/Vijay Sales: Playwright + BeautifulSoup4
+- Others: Playwright + Groq LLM extraction
+
+### Stage 3 — Extractor (`agents/extractor.py`)
+- Normalizes listings into `NormalizedOffer` objects
+- Parses prices, delivery, cleans URLs
+- Deduplication and fallback logic
+
+### Stage 4 — Matcher (`agents/matcher.py`)
+- Multi-gate matching (type, brand, model, storage, category, accessory)
+- Weighted scoring, thresholding
+- LLM semantic matching fallback
+- Retry loop for zero matches
+
+### Stage 5 — Ranker (`agents/ranker.py`)
+- Mode-aware scoring (Cheapest, Fastest, Reliable, Balanced)
+- Assigns badges (Best Price, Fastest Delivery, Most Trusted, Recommended)
+
+### Stage 6 — Explainer (`agents/llm_ranker.py`)
+- Generates AI recommendation for best offer
+
+---
+
+## Tech Stack (Detailed)
+
+| Layer         | Technology                                                      |
+|--------------|------------------------------------------------------------------|
+| Frontend     | React 18, Vite 6, CSS Variables (dark mode)                      |
+| Backend      | Python 3.11+, FastAPI, Uvicorn (async)                           |
+| Pipeline     | LangGraph StateGraph with parallel fan-out/fan-in                |
+| LLM          | Groq — Llama 3.3 70B Versatile + Llama 3.1 8B Instant            |
+| Scraping     | Playwright (stealth anti-detection), BeautifulSoup4, lxml        |
+| Chatbot      | SerpAPI Google Shopping + Groq conversational LLM                |
+| Caching      | Redis (optional, 5-min TTL)                                      |
+| Config       | YAML marketplace configs, Pydantic Settings, `.env`              |
+| Dev          | Watchfiles hot-reload, Vite HMR proxy                            |
+
+---
+
+## API Endpoints (Detailed)
+
+| Method | Endpoint                | Description                                                      |
+|--------|------------------------|------------------------------------------------------------------|
+| GET    | `/`                    | Server heartbeat                                                 |
+| GET    | `/health`              | System readiness + LLM connectivity                              |
+| GET    | `/api/marketplaces`    | List all configured marketplace scrapers                         |
+| POST   | `/api/compare`         | Main endpoint — triggers LangGraph pipeline, SSE/JSON response   |
+| POST   | `/api/compare/sync`    | Synchronous JSON-only version                                    |
+| POST   | `/api/chat`            | Chatbot endpoint — Intent → SerpAPI → LLM response               |
+| POST   | `/api/debug/compare`   | Debug mode — returns full pipeline state                         |
 
 ### Compare Request Body
-
 ```json
 {
     "query": "Samsung Galaxy S24 128GB",
@@ -255,7 +233,6 @@ Open **http://localhost:5173** in your browser.
 ```
 
 ### Chat Request Body
-
 ```json
 {
     "message": "Best phone under 20000",
@@ -268,26 +245,7 @@ Open **http://localhost:5173** in your browser.
 
 ---
 
-## Environment Variables
-
-| Variable | Required | Default | Description |
-|---|---|---|---|
-| `GROQ_API_KEY` | **Yes** | — | Groq API key for Llama 3.3 70B / 8B |
-| `SERPAPI_KEY` | No | — | SerpAPI key (enables chatbot Google Shopping) |
-| `GROQ_PRIMARY_MODEL` | No | `llama-3.3-70b-versatile` | Primary LLM model |
-| `GROQ_FAST_MODEL` | No | `llama-3.1-8b-instant` | Fast model (scraper extraction) |
-| `LLM_ENABLED` | No | `true` | Enable/disable LLM features |
-| `LLM_MAX_CONCURRENT` | No | `3` | Max concurrent Groq API calls |
-| `PLAYWRIGHT_HEADLESS` | No | `True` | Run browser in headless mode |
-| `DEBUG` | No | `False` | Debug mode |
-| `LOG_LEVEL` | No | `INFO` | Logging level |
-| `REDIS_URL` | No | — | Redis URL for response caching (5-min TTL) |
-| `DATABASE_URL` | No | — | PostgreSQL URL for price history |
-| `ALLOWED_ORIGINS` | No | `localhost` | CORS allowed origins |
-
----
-
-## Project Structure
+## Project Structure (Detailed)
 
 ```
 ├── run.py                      # Entry point — uvicorn + hot-reload
@@ -333,6 +291,14 @@ Open **http://localhost:5173** in your browser.
 │   │       ├── flipkart.yaml
 │   │       └── ... (12 sites)
 │   │
+│   ├── watchlist/              # Watchlist, email sender, scheduler
+│   │   ├── models.py           # SQLite fallback DB
+│   │   ├── service.py          # CRUD for watchlist
+│   │   ├── email_sender.py     # AI-generated email alerts
+│   │   ├── scheduler.py        # APScheduler for price checks
+│   │   ├── price_monitor.py    # Price check logic
+│   │   └── schemas.py          # Watchlist models
+│   │
 │   ├── chatbot/                # AI Shopping Chatbot (Feature 2)
 │   │   ├── intent.py           # Step 1: Intent classification (Groq)
 │   │   ├── search.py           # Step 2: SerpAPI Google Shopping
@@ -352,25 +318,28 @@ Open **http://localhost:5173** in your browser.
         ├── main.jsx            # React entry
         ├── index.css           # All styles (dark theme + chatbot)
         └── components/
+            ├── WatchlistButton.jsx   # Watchlist modal
             └── ChatbotAssistant.jsx  # Chatbot overlay component
 ```
 
 ---
 
-## Supported Marketplaces
+## Supported Marketplaces (Detailed)
 
-| Marketplace | Scraping Method | Delivery Extraction |
-|---|---|---|
-| Amazon.in | Playwright + BS4 (CSS selectors) | CSS selectors + Prime detection |
-| Flipkart | Playwright + Groq LLM 8B | LLM extraction from page text |
-| Croma | Playwright + Groq LLM 8B | LLM extraction from page text |
-| JioMart | Playwright + Groq LLM 8B | LLM extraction from page text |
-| Reliance Digital | Playwright + Groq LLM 8B | LLM extraction from page text |
-| Tata CLiQ | Playwright + Groq LLM 8B | LLM extraction from page text |
-| Vijay Sales | Playwright + BS4 (CSS selectors) | CSS selectors |
-| Samsung Shop | Playwright + Groq LLM 8B | LLM extraction from page text |
-| Meesho | Playwright + Groq LLM 8B | LLM + fallback estimate |
-| Snapdeal | Playwright + Groq LLM 8B | LLM + fallback estimate |
+| Marketplace      | Scraping Method                | Delivery Extraction         |
+|------------------|-------------------------------|----------------------------|
+| Amazon.in        | Playwright + BS4              | CSS selectors + Prime      |
+| Flipkart         | Playwright + Groq LLM         | LLM extraction             |
+| Croma            | Playwright + Groq LLM         | LLM extraction             |
+| JioMart          | Playwright + Groq LLM         | LLM extraction             |
+| Reliance Digital | Playwright + Groq LLM         | LLM extraction             |
+| Tata CLiQ        | Playwright + Groq LLM         | LLM extraction             |
+| Vijay Sales      | Playwright + BS4              | CSS selectors              |
+| Samsung Shop     | Playwright + Groq LLM         | LLM extraction             |
+| Meesho           | Playwright + Groq LLM         | LLM + fallback estimate    |
+| Snapdeal         | Playwright + Groq LLM         | LLM + fallback estimate    |
+| Paytm Mall       | Playwright + Groq LLM         | LLM extraction             |
+| Shopsy           | Playwright + Groq LLM         | LLM extraction             |
 
 ---
 
