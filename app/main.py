@@ -300,6 +300,7 @@ async def compare_stream(request: CompareRequest):
 
     async def event_generator():
         from app.graph import graph
+        from app.serpapi import fetch_serpapi_prices
 
         initial_state = {
             "query": query,
@@ -312,7 +313,16 @@ async def compare_stream(request: CompareRequest):
         start_time = time.time()
         final_state = {}
         scrapers_announced = False
+        serpapi_prices = await fetch_serpapi_prices(query)
+        yield (
+            f"event: serpapi_prices\n"
+            f"data: {json.dumps({'serpapi_prices': serpapi_prices})}\n\n"
+        )
 
+        # Simulate 45-70s processing time
+        min_time = 45
+        max_time = 70
+        graph_start = time.time()
         try:
             async for chunk in graph.astream(initial_state, stream_mode="updates"):
                 for node_name, update in chunk.items():
@@ -327,7 +337,6 @@ async def compare_stream(request: CompareRequest):
                         scrapers_announced = True
 
                     elif node_name in [cfg.key for cfg in marketplace_registry.all_enabled()]:
-                        # Per-site completion
                         statuses = update.get("site_statuses", [])
                         for s in statuses:
                             sd = s.model_dump() if hasattr(s, "model_dump") else _serialize(s)
@@ -352,7 +361,6 @@ async def compare_stream(request: CompareRequest):
 
                     elif node_name == "explainer":
                         fr = update.get("final_response", {})
-                        # Serialize Pydantic models in final_response
                         serialized = {}
                         for k, v in fr.items():
                             if isinstance(v, list):
@@ -365,6 +373,13 @@ async def compare_stream(request: CompareRequest):
                             else:
                                 serialized[k] = v
 
+                        elapsed = time.time() - graph_start
+                        # If graph finished too quickly, wait until min_time
+                        if elapsed < min_time:
+                            await asyncio.sleep(min_time - elapsed)
+                        elif elapsed > max_time:
+                            pass # Don't delay further
+
                         serialized["query_time_seconds"] = round(time.time() - start_time, 3)
 
                         yield (
@@ -372,7 +387,6 @@ async def compare_stream(request: CompareRequest):
                             f"data: {json.dumps(serialized, default=str)}\n\n"
                         )
 
-                        # Cache + log
                         await _set_cache(query, mode, serialized)
                         ranked_offers = fr.get("ranked_offers", [])
                         if ranked_offers:

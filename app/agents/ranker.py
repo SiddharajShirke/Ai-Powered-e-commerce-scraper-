@@ -62,25 +62,23 @@ def _delivery_score(days_max: Optional[int]) -> float:
 
 def _rank_offers(offers: List[NormalizedOffer], mode: RankingMode) -> List[NormalizedOffer]:
     """Core ranking logic shared by both run_ranker and ranker_node."""
-    weights = _WEIGHTS.get(mode, _WEIGHTS[RankingMode.balanced])
 
-    if not offers:
+    # Strictly prioritize match score first
+    STRICT_MATCH_THRESHOLD = 0.7  # Only consider offers with match_score >= 0.7
+    strictly_matched = [o for o in offers if getattr(o, 'match_score', 0.0) >= STRICT_MATCH_THRESHOLD and o.effective_price is not None]
+    if not strictly_matched:
+        logger.info("Ranker: No strictly matched offers above threshold %.2f", STRICT_MATCH_THRESHOLD)
         return []
 
-    valid_prices = [
-        o.effective_price for o in offers
-        if o.effective_price is not None
-    ]
+    # Now apply ranking logic only to strictly matched offers
+    weights = _WEIGHTS.get(mode, _WEIGHTS[RankingMode.balanced])
+    valid_prices = [o.effective_price for o in strictly_matched if o.effective_price is not None]
     if not valid_prices:
         return []
-
     lowest_price = min(valid_prices)
 
     scored = []
-    for offer in offers:
-        if offer.effective_price is None:
-            continue
-
+    for offer in strictly_matched:
         ps = _price_score(offer.effective_price, lowest_price)
         rs = _rating_score(offer.seller_rating or offer.rating)
         ds = _delivery_score(offer.delivery_days_max)
@@ -121,25 +119,17 @@ def _rank_offers(offers: List[NormalizedOffer], mode: RankingMode) -> List[Norma
     scored = deduped
 
     # ── Badge assignment ─────────────────────────────────────────────────
-    # "Best Price" → lowest effective_price
     priced = [o for o in scored if o.effective_price is not None]
     best_price_offer = min(priced, key=lambda o: o.effective_price) if priced else None
-
-    # "Fastest Delivery" → shortest delivery_days
     delivery_offers = [o for o in scored if o.delivery_days_max is not None]
     fastest_offer = min(delivery_offers, key=lambda o: o.delivery_days_max) if delivery_offers else None
-
-    # "Most Trusted" → highest rating
     rated_offers = [o for o in scored if (o.seller_rating or o.rating) is not None]
     most_trusted = max(rated_offers, key=lambda o: o.seller_rating or o.rating or 0) if rated_offers else None
-
-    # "Recommended" → highest composite_score
     recommended = scored[0] if scored else None
 
     for i, offer in enumerate(scored):
         offer.rank = i + 1
         badges: List[str] = []
-
         if offer is recommended:
             badges.append("Recommended")
         if best_price_offer and offer is best_price_offer:
@@ -148,14 +138,12 @@ def _rank_offers(offers: List[NormalizedOffer], mode: RankingMode) -> List[Norma
             badges.append("Fastest Delivery")
         if most_trusted and offer is most_trusted:
             badges.append("Most Trusted")
-
-        # One offer can hold multiple badges (deduplicated, order preserved)
         offer.badges = list(dict.fromkeys(badges))
 
     top_key = scored[0].platform_key if scored else "none"
     top_price = scored[0].effective_price if scored else None
     logger.info(
-        "Ranker [%s]: %d ranked, top=%s (score=%.3f, price=%s)",
+        "Ranker [%s]: %d strictly matched, top=%s (score=%.3f, price=%s)",
         mode.value, len(scored), top_key,
         scored[0].composite_score if scored else 0.0,
         f"Rs.{top_price:,.0f}" if top_price else "null",
